@@ -2,6 +2,7 @@ from django.shortcuts import render, redirect, reverse
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import login, logout
+from django.http import FileResponse
 from django.core.cache import cache
 from comfy.models import VisitHistory
 from asgiref.sync import sync_to_async
@@ -9,6 +10,7 @@ import datetime
 from .extractors.extract import determine_option, get_supported_websites
 from .utils.scrape import scrape_info, scrape_chapter, scrape_results
 from .utils.cache import cached_scrape
+from .utils.download import download_manga_pdf
 
 ERR_URL_WRONG = "URL entered is not recognised"
 CACHE_TIMEOUT = 60 * 60             # 1 hour cache
@@ -156,7 +158,6 @@ async def extract_view(request):
         option = await cache.aget(f'{username}-option')
         url = await cache.aget(f'{username}-series_url')
 
-        print(option, url)
         if (option is not None) and (url is not None):
             results = await cached_scrape(scrape_info, option, url=url)
 
@@ -184,28 +185,44 @@ async def extract_view(request):
         # redirect to error page soon
         return redirect(reverse('comfy:home'))
     else:
-        # A chapter was selected for preview
-        username = await get_user_name(request)
-        url = request.POST.get('preview_url', None)
+        if 'preview_url' in request.POST:
+            # A chapter was selected for preview
+            username = await get_user_name(request)
+            url = request.POST.get('preview_url', None)
 
-        if url is not None:
-            # Cache url for preview page
-            await cache.aset(f'{username}-preview_url', url, timeout=CACHE_TIMEOUT)
+            if url is not None:
+                # Cache url for preview page
+                await cache.aset(f'{username}-preview_url', url, timeout=CACHE_TIMEOUT)
 
-            # Save chapter in last visited history
-            chapters = await cache.aget(f'{username}-current_chapter_list')
-            query = await sync_to_async(VisitHistory.objects.filter)(user=request.user, series_url=url)
-            series_visit = await sync_to_async(query.first)()
+                # Save chapter in last visited history
+                chapters = await cache.aget(f'{username}-current_chapter_list')
+                query = await sync_to_async(VisitHistory.objects.filter)(user=request.user, series_url=url)
+                series_visit = await sync_to_async(query.first)()
 
-            if series_visit is not None:
-                for chapter in chapters:
-                    if chapter.link == url:
-                        series_visit.last_read = chapter.header
+                if series_visit is not None:
+                    for chapter in chapters:
+                        if chapter.link == url:
+                            series_visit.last_read = chapter.header
 
-                series_visit.preview_url = url
-                await sync_to_async(series_visit.save)()
-    
-            return redirect(reverse('comfy:preview'))
+                    series_visit.preview_url = url
+                    await sync_to_async(series_visit.save)()
+        
+                return redirect(reverse('comfy:preview'))
+        elif 'download_url' in request.POST:
+            # A chapter is selected for download
+            url = request.POST.get('download_url', None)
+            username = await get_user_name(request)
+            option = await cache.aget(f'{username}-option')
+
+            if url is not None:
+                results = await cached_scrape(scrape_chapter, option, url=url)
+
+                if results is not None:
+                    # Get generated PDF buffer from image URLs
+                    pdf_buffer = download_manga_pdf(results.pages.values())
+
+                    return FileResponse(pdf_buffer, as_attachment=True, filename="download.pdf")
+            return redirect(reverse('comfy:series'))
 
 @login_required
 async def preview_view(request):
